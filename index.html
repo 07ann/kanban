@@ -1,4 +1,8 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>个人工作看板</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -145,7 +149,13 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
 .zacts .z-go { background: var(--ok); border-color: var(--ok); color: var(--card); font-weight: 500; }
 .zacts .z-del { color: var(--alert); }
 .zclear { font-size: 13px; color: var(--ok); padding: 10px 0; }
-.sync { font-size: 12px; color: var(--muted); width: 100%; text-align: right; margin-top: -6px; }
+.sync { font-size: 12px; color: var(--muted); width: 100%; text-align: right; margin-top: -6px; cursor: pointer; }
+.sync:hover { text-decoration: underline; }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 6px; font-size: 13px; }
+.steps a, .syncinfo a { color: var(--accent); }
+.syncinfo { display: grid; gap: 4px; font-size: 13px; background: var(--surface); border-radius: 8px; padding: 10px 12px; }
+.syncerr { font-size: 13px; color: var(--alert); }
+#syncToken { flex: 1 1 200px; min-width: 0; border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 8px 10px; font-family: var(--font-mono); }
 .sync.ok { color: var(--ok); }
 .sync.error { color: var(--alert); }
 .footline { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--muted); }
@@ -491,7 +501,7 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
   .month { gap: 2px; }
   .mday { padding: 3px; border-radius: 6px; }
   /* 输入框 16px，避免 iPhone 自动放大 */
-  input[type="text"], input[type="time"], input[type="date"], input:not([type]), textarea { font-size: 16px !important; }
+  input[type="text"], input[type="password"], input[type="time"], input[type="date"], input:not([type]), textarea { font-size: 16px !important; }
   .timerbar .tleft { font-size: 18px; }
 }
 /* 触屏：加大点按区域 */
@@ -509,6 +519,8 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
   *, *::before { animation: none !important; transition: none !important; }
 }
 </style>
+</head>
+<body>
 <div class="wrap" id="app"></div>
 
 <!-- 任务弹窗 -->
@@ -601,6 +613,8 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
 </div>
 
 <!-- 备份弹窗 -->
+<div class="overlay" id="syncOverlay" hidden><div class="modal" id="syncBox"></div></div>
+
 <div class="overlay" id="calOverlay" hidden><div class="modal cal" id="calBox"></div></div>
 
 <div class="overlay" id="ioOverlay" hidden>
@@ -825,18 +839,23 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
     queueCloud();
   }
 
-  /* ---------- 云端同步：每人一份私有数据，电脑和手机打开都是同一份 ---------- */
-  var cloud = { ref: null, status: 'local', busy: false, pending: false, timer: null, lastSync: 0 };
-  function setSync(st) { cloud.status = st; var el = $('syncState'); if (el) paintSync(el); }
+  /* ---------- 云端同步：Claude 账号存储，或 GitHub Gist ---------- */
+  var cloud = { ref: null, kind: '', status: 'local', busy: false, pending: false, timer: null, lastSync: 0 };
+  function setSync(st) { cloud.status = st; var el = $('syncState'); if (el) paintSync(el); if (!$('syncOverlay').hidden) renderSync(); }
   function paintSync(el) {
-    var map = { local: '仅保存在本机', syncing: '同步中…', ok: '已同步云端', error: '同步失败，稍后重试' };
+    var map = { local: '仅保存在本机 · 设置同步', syncing: '同步中…', ok: cloud.kind === 'gist' ? '已同步到 GitHub' : '已同步云端', error: '同步失败，稍后重试' };
     el.textContent = map[cloud.status] || ''; el.className = 'sync ' + cloud.status;
   }
   function queueCloud() {
     if (!cloud.ref) return;
     clearTimeout(cloud.timer);
     setSync('syncing');
-    cloud.timer = setTimeout(pushCloud, 800);
+    cloud.timer = setTimeout(pushCloud, cloud.kind === 'gist' ? 1500 : 800);
+  }
+  function onCloudErr(e) {
+    setSync('error');
+    if (e && e.status === 401) toast('GitHub 密钥失效了，请点“同步”重新连接');
+    else if (e && e.status === 404 && cloud.kind === 'gist') toast('找不到 GitHub 上的数据，请点“同步”重新连接');
   }
   function pushCloud() {
     if (!cloud.ref) return;
@@ -844,41 +863,157 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
     cloud.busy = true;
     var json = JSON.stringify(state);
     cloud.ref.set({ json: json, savedAt: state.savedAt || Date.now() }).then(function () {
-      cloud.lastSync = state.savedAt || Date.now(); setSync('ok');
-      if (json.length > 200000) toast('数据快满了，可以清理一些很久以前的已完成任务');
-    }, function () { setSync('error'); }).then(function () {
+      cloud.lastSync = Date.now(); setSync('ok');
+      if (cloud.kind === 'claude' && json.length > 200000) toast('数据快满了，可以清理一些很久以前的已完成任务');
+    }, onCloudErr).then(function () {
       cloud.busy = false;
       if (cloud.pending) { cloud.pending = false; pushCloud(); }
     });
+  }
+  function adoptRemote(d) {
+    var s2 = normalize(JSON.parse(d.json));
+    if (s2) { state = s2; try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} render(); }
   }
   function pullCloud(first) {
     if (!cloud.ref) return Promise.resolve();
     return cloud.ref.get().then(function (snap) {
       var d = snap.exists ? snap.data() : null;
       if (d && typeof d.json === 'string') {
-        if ((d.savedAt || 0) > (state.savedAt || 0) || (first && state.sample)) {
-          var s2 = normalize(JSON.parse(d.json));
-          if (s2) { state = s2; try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} render(); }
-        } else if ((state.savedAt || 0) > (d.savedAt || 0)) { pushCloud(); return; }
-        cloud.lastSync = d.savedAt || 0; setSync('ok');
+        if ((d.savedAt || 0) > (state.savedAt || 0) || (first && state.sample)) adoptRemote(d);
+        else if ((state.savedAt || 0) > (d.savedAt || 0)) { pushCloud(); return; }
+        cloud.lastSync = Date.now(); setSync('ok');
       } else { pushCloud(); }
-    }, function () { setSync('error'); });
+    }, onCloudErr);
   }
+
+  /* GitHub Gist：数据存在你账号下的一个私密 Gist，密钥只保存在本机浏览器 */
+  var GIST_KEY = 'personal-kanban-gist', GIST_FILE = 'kanban.json', GIST_DESC = '个人工作看板数据', GH = 'https://api.github.com';
+  function gistCfg() { try { return JSON.parse(localStorage.getItem(GIST_KEY) || 'null'); } catch (e) { return null; } }
+  function saveGistCfg(c) { try { if (c) localStorage.setItem(GIST_KEY, JSON.stringify(c)); else localStorage.removeItem(GIST_KEY); } catch (e) {} }
+  function gh(token, path, opts) {
+    opts = opts || {};
+    return fetch(GH + path, {
+      method: opts.method || 'GET', cache: 'no-store',
+      headers: { 'Accept': 'application/vnd.github+json', 'Authorization': 'Bearer ' + token, 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
+      body: opts.body ? JSON.stringify(opts.body) : undefined
+    }).then(function (r) {
+      if (!r.ok) { var e = new Error('GitHub ' + r.status); e.status = r.status; throw e; }
+      return r.status === 204 ? null : r.json();
+    });
+  }
+  function gistFiles(json, savedAt) { var f = {}; f[GIST_FILE] = { content: '{"savedAt":' + (savedAt || 0) + ',"state":' + json + '}' }; return f; }
+  function readGistFile(g) {
+    var f = g && g.files && g.files[GIST_FILE];
+    if (!f) return Promise.resolve(null);
+    var p = f.truncated ? fetch(f.raw_url, { cache: 'no-store' }).then(function (r) { return r.text(); }) : Promise.resolve(f.content);
+    return p.then(function (t) { try { var o = JSON.parse(t); return o && o.state ? { json: JSON.stringify(o.state), savedAt: o.savedAt || 0 } : null; } catch (e) { return null; } });
+  }
+  function gistRef(cfg) {
+    return {
+      get: function () { return gh(cfg.token, '/gists/' + cfg.id).then(readGistFile).then(function (d) { return { exists: !!d, data: function () { return d; } }; }); },
+      set: function (v) { return gh(cfg.token, '/gists/' + cfg.id, { method: 'PATCH', body: { files: gistFiles(v.json, v.savedAt) } }); }
+    };
+  }
+  function useGist(cfg) { cloud.ref = gistRef(cfg); cloud.kind = 'gist'; }
+
+  var syncUI = { step: 'idle', err: '', remote: null, cfg: null, confirmOff: false };
+  function openSync() { syncUI.err = ''; syncUI.confirmOff = false; if (syncUI.step !== 'choose') syncUI.step = 'idle'; renderSync(); $('syncOverlay').hidden = false; }
+  function closeSync() { $('syncOverlay').hidden = true; }
+  function connectGist(token) {
+    syncUI.step = 'working'; syncUI.err = ''; renderSync();
+    gh(token, '/gists?per_page=100').then(function (list) {
+      var g = (list || []).filter(function (x) { return x.files && x.files[GIST_FILE] && x.description === GIST_DESC; })[0];
+      if (g) return gh(token, '/gists/' + g.id).then(readGistFile).then(function (d) { return { id: g.id, remote: d }; });
+      return gh(token, '/gists', { method: 'POST', body: { description: GIST_DESC, public: false, files: gistFiles(JSON.stringify(state), state.savedAt || Date.now()) } })
+        .then(function (ng) { return { id: ng.id, remote: null }; });
+    }).then(function (r) {
+      var cfg = { token: token, id: r.id };
+      if (r.remote && !state.sample) { syncUI.step = 'choose'; syncUI.remote = r.remote; syncUI.cfg = cfg; renderSync(); return; }
+      saveGistCfg(cfg); useGist(cfg);
+      if (r.remote) adoptRemote(r.remote);
+      cloud.lastSync = Date.now(); syncUI.step = 'idle'; setSync('ok'); renderSync();
+      toast(r.remote ? '已连接，读取了 GitHub 上的数据' : '已连接，数据已保存到 GitHub');
+    }).catch(function (e) {
+      syncUI.step = 'idle';
+      syncUI.err = e && e.status === 401 ? '密钥无效，请检查是否复制完整' : e && (e.status === 403 || e.status === 404) ? '这个密钥没有 gist 权限，请重新生成并勾选 gist' : '连接失败，请检查网络后再试';
+      renderSync();
+    });
+  }
+  function finishChoice(useRemote) {
+    var cfg = syncUI.cfg, d = syncUI.remote;
+    saveGistCfg(cfg); useGist(cfg);
+    syncUI.step = 'idle'; syncUI.remote = null; syncUI.cfg = null;
+    if (useRemote) { adoptRemote(d); cloud.lastSync = Date.now(); setSync('ok'); toast('已换成 GitHub 上的数据'); }
+    else { state.savedAt = Date.now(); pushCloud(); toast('已用这台设备的数据覆盖 GitHub'); }
+    renderSync();
+  }
+  function fmtTime(ts) { if (!ts) return '–'; var d = new Date(ts); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function renderSync() {
+    var box = $('syncBox'); box.textContent = '';
+    box.appendChild(h('h3', { text: '同步到 GitHub' }));
+    var foot = h('div', { class: 'modal-foot' });
+    if (cloud.kind === 'claude') {
+      box.appendChild(h('p', { class: 'sub', style: 'margin:0', text: '这里是 Claude 在线版，已经通过你的 Claude 账号自动同步，不需要设置。' }));
+    } else if (syncUI.step === 'choose') {
+      box.appendChild(h('p', { style: 'margin:0', text: 'GitHub 上已经有看板数据（最后保存于 ' + fmtTime(syncUI.remote.savedAt) + '），这台设备上也有数据。要用哪一份？' }));
+      box.appendChild(h('p', { class: 'sub', style: 'margin:0', text: '在第二台设备上连接时，一般选“用 GitHub 上的”。没选中的那一份会被覆盖。' }));
+      foot.appendChild(h('button', { type: 'button', class: 'btn', text: '用这台设备的覆盖 GitHub', onclick: function () { finishChoice(false); } }));
+      foot.appendChild(h('button', { type: 'button', class: 'btn primary', text: '用 GitHub 上的', onclick: function () { finishChoice(true); } }));
+    } else if (cloud.kind === 'gist') {
+      var cfg = gistCfg() || {};
+      box.appendChild(h('div', { class: 'syncinfo' }, [
+        h('span', null, ['状态：', h('b', { class: 'sync ' + cloud.status, style: 'width:auto;text-align:left;margin:0', text: { ok: '已同步', syncing: '同步中…', error: '同步失败', local: '未同步' }[cloud.status] || '' })]),
+        h('span', { text: '上次同步：' + fmtTime(cloud.lastSync) }),
+        h('span', null, ['数据位置：', h('a', { href: 'https://gist.github.com/' + (cfg.id || ''), target: '_blank', rel: 'noopener', text: '我的私密 Gist' })])
+      ]));
+      box.appendChild(h('p', { class: 'sub', style: 'margin:0', text: '改动约 2 秒后自动上传；打开页面、切回页面时自动拉取另一台设备的改动。要在手机上使用，打开同一网址，点“同步”，粘贴同一个密钥即可。' }));
+      if (syncUI.confirmOff) {
+        foot.appendChild(h('span', { class: 'sub', style: 'margin:0', text: '断开后这台设备不再同步，本机数据保留。' }));
+        foot.appendChild(h('button', { type: 'button', class: 'btn danger', text: '确认断开', onclick: function () { saveGistCfg(null); cloud.ref = null; cloud.kind = ''; syncUI.confirmOff = false; setSync('local'); renderSync(); } }));
+        foot.appendChild(h('button', { type: 'button', class: 'btn', text: '取消', onclick: function () { syncUI.confirmOff = false; renderSync(); } }));
+      } else {
+        foot.appendChild(h('button', { type: 'button', class: 'btn danger', text: '断开连接', onclick: function () { syncUI.confirmOff = true; renderSync(); } }));
+        foot.appendChild(h('span', { class: 'spacer' }));
+        foot.appendChild(h('button', { type: 'button', class: 'btn', text: '立即同步', onclick: function () { setSync('syncing'); pullCloud(false); } }));
+      }
+    } else {
+      box.appendChild(h('ol', { class: 'steps' }, [
+        h('li', null, [h('a', { href: 'https://github.com/settings/tokens/new?scopes=gist&description=' + encodeURIComponent('个人工作看板'), target: '_blank', rel: 'noopener', text: '在 GitHub 生成一个密钥 ↗' }), '：只勾选 gist，Expiration（有效期）可以选 No expiration，然后点最下方的 Generate token。']),
+        h('li', { text: '复制生成的密钥（以 ghp_ 开头），粘贴到下面，点“连接”。' }),
+        h('li', { text: '在手机上打开同一网址，点“同步”，粘贴同一个密钥。' })
+      ]));
+      var inp = h('input', { type: 'password', id: 'syncToken', placeholder: 'ghp_…', autocomplete: 'off', spellcheck: 'false' });
+      var go = h('button', { type: 'button', class: 'btn primary', text: syncUI.step === 'working' ? '连接中…' : '连接', disabled: syncUI.step === 'working' ? true : null,
+        onclick: function () { var v = inp.value.trim(); if (!v) { syncUI.err = '先粘贴密钥'; renderSync(); return; } connectGist(v); } });
+      inp.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); go.click(); } });
+      box.appendChild(h('div', { class: 'quick' }, [inp, go]));
+      if (syncUI.err) box.appendChild(h('div', { class: 'syncerr', text: syncUI.err }));
+      box.appendChild(h('p', { class: 'sub', style: 'margin:0', text: '数据保存在你 GitHub 账号下的私密 Gist 里。密钥只保存在这台设备的浏览器中，不会写进网页代码。' }));
+    }
+    foot.appendChild(h('button', { type: 'button', class: 'btn', text: '关闭', onclick: closeSync }));
+    box.appendChild(foot);
+  }
+
   function initCloud() {
-    if (!window.claude || typeof window.claude.use !== 'function') return;
-    Promise.all([window.claude.use('db'), window.claude.use('user')]).then(function (r) {
-      var db = r[0], user = r[1];
-      if (!db || !user) return;
-      return user.id().then(function (id) {
-        if (!id) return;
-        cloud.ref = db.doc('data/users/' + id + '/kanban');
-        setSync('syncing');
-        return pullCloud(true);
-      });
-    }).catch(function () { setSync('local'); });
+    function tryGist() { var c = gistCfg(); if (c && c.token && c.id) { useGist(c); setSync('syncing'); pullCloud(true); } }
+    if (window.claude && typeof window.claude.use === 'function') {
+      Promise.all([window.claude.use('db'), window.claude.use('user')]).then(function (r) {
+        var db = r[0], user = r[1];
+        if (!db || !user) { tryGist(); return; }
+        return user.id().then(function (id) {
+          if (!id) { tryGist(); return; }
+          cloud.ref = db.doc('data/users/' + id + '/kanban'); cloud.kind = 'claude';
+          setSync('syncing');
+          return pullCloud(true);
+        });
+      }).catch(function () { tryGist(); });
+    } else tryGist();
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'visible' && cloud.ref && !cloud.busy && cloud.status !== 'syncing') pullCloud(false);
     });
+    setInterval(function () {
+      if (cloud.kind === 'gist' && document.visibilityState === 'visible' && !cloud.busy && cloud.status !== 'syncing') pullCloud(false);
+    }, 60000);
   }
 
   var state = load() || sample();
@@ -1326,9 +1461,10 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
         h('button', { class: 'btn primary', type: 'button', text: '＋ 新建任务', onclick: function () { openCard(null); } }),
         h('button', { class: 'btn', type: 'button', text: '＋ 新建项目', onclick: function () { openProject(null); } }),
         h('button', { class: 'btn', type: 'button', text: '月历', onclick: function () { openCal(); } }),
+        h('button', { class: 'btn', type: 'button', text: '同步', onclick: openSync }),
         h('button', { class: 'btn', type: 'button', text: '备份', onclick: openIO })
       ]),
-      (function () { var el = h('span', { id: 'syncState' }); paintSync(el); return el; })()
+      (function () { var el = h('span', { id: 'syncState', role: 'button', tabindex: '0', onclick: openSync, onkeydown: function (e) { if (e.key === 'Enter') openSync(); } }); paintSync(el); return el; })()
     ]));
 
     var perDay = days.map(function (d) {
@@ -1849,7 +1985,7 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
     save(); render(); toast('示例已清空，先建一个项目或任务吧');
   }
 
-  ['cardOverlay', 'projOverlay', 'waitOverlay', 'ioOverlay', 'calOverlay'].forEach(function (id) {
+  ['cardOverlay', 'projOverlay', 'waitOverlay', 'ioOverlay', 'calOverlay', 'syncOverlay'].forEach(function (id) {
     $(id).addEventListener('click', function (e) {
       if (e.target !== this) return;
       this.hidden = true;
@@ -1860,7 +1996,7 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
     var wasProj = !$('projOverlay').hidden || !$('calOverlay').hidden;
-    ['cardOverlay', 'projOverlay', 'waitOverlay', 'ioOverlay', 'calOverlay'].forEach(function (id) { $(id).hidden = true; });
+    ['cardOverlay', 'projOverlay', 'waitOverlay', 'ioOverlay', 'calOverlay', 'syncOverlay'].forEach(function (id) { $(id).hidden = true; });
     pendingWait = null; if (wasProj) { pCur = null; render(); }
   });
 
@@ -1870,5 +2006,5 @@ h1 { font-family: var(--font-display); font-size: 28px; margin: 0; letter-spacin
   initCloud();
 })();
 </script>
-
-</body></html>
+</body>
+</html>
